@@ -14,6 +14,7 @@ class Trainer:
         self,
         model,
         optimizer,
+        scheduler,
         train_sampler,
         val_sampler,
         batch_size: int,
@@ -29,6 +30,7 @@ class Trainer:
     ) -> None:
         self.model = model
         self.optimizer = optimizer
+        self.scheduler = scheduler
         self.train_sampler = train_sampler
         self.val_sampler = val_sampler
         self.batch_size = batch_size
@@ -44,7 +46,6 @@ class Trainer:
 
         self.use_amp = self.amp_dtype is not None
 
-        # GradScaler нужен только для fp16.
         self.scaler: torch.amp.GradScaler | None = None
         if self.amp_dtype == torch.float16:
             self.scaler = torch.amp.GradScaler("cuda", enabled=True)
@@ -64,36 +65,18 @@ class Trainer:
             amp_dtype=self.amp_dtype,
         )
 
+    def _get_lr(self) -> float:
+        return self.optimizer.param_groups[0]["lr"]
+
     def train(self) -> None:
         self.model.train()
         start = time.time()
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        for step in range(self.start_step, self.max_steps):
-            if step % self.eval_interval == 0 or step == self.max_steps - 1:
-                train_metrics = self.train_evaluator.run()
-                val_metrics = self.val_evaluator.run()
-                elapsed = time.time() - start
-                print(
-                    f"step={step:04d} "
-                    f"train_loss={train_metrics['loss']:.4f} train_ppl={train_metrics['perplexity']:.2f} "
-                    f"val_loss={val_metrics['loss']:.4f} val_ppl={val_metrics['perplexity']:.2f} "
-                    f"elapsed={elapsed:.1f}s"
-                )
-                save_checkpoint(
-                    os.path.join(self.checkpoint_dir, "last.pt"),
-                    {
-                        "model_state": model_state_dict(self.model),
-                        "optimizer_state": self.optimizer.state_dict(),
-                        "tokenizer": self.tokenizer.state_dict(),
-                        "config": self.config,
-                        "step": step,
-                    },
-                )
-                self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
 
+        for step in range(self.start_step, self.max_steps):
             xb, yb = self.train_sampler.next_batch(self.batch_size)
-            self.optimizer.zero_grad(set_to_none=True)
 
             if self.use_amp:
                 with torch.autocast(device_type="cuda", dtype=self.amp_dtype):
@@ -114,3 +97,32 @@ class Trainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
+
+            if self.scheduler is not None:
+                self.scheduler.step()
+
+            self.optimizer.zero_grad(set_to_none=True)
+
+            if step % self.eval_interval == 0 or step == self.max_steps - 1:
+                train_metrics = self.train_evaluator.run()
+                val_metrics = self.val_evaluator.run()
+                elapsed = time.time() - start
+                print(
+                    f"step={step:04d} "
+                    f"lr={self._get_lr():.6e} "
+                    f"train_loss={train_metrics['loss']:.4f} train_ppl={train_metrics['perplexity']:.2f} "
+                    f"val_loss={val_metrics['loss']:.4f} val_ppl={val_metrics['perplexity']:.2f} "
+                    f"elapsed={elapsed:.1f}s"
+                )
+                save_checkpoint(
+                    os.path.join(self.checkpoint_dir, "last.pt"),
+                    {
+                        "model_state": model_state_dict(self.model),
+                        "optimizer_state": self.optimizer.state_dict(),
+                        "scheduler_state": self.scheduler.state_dict() if self.scheduler is not None else None,
+                        "tokenizer": self.tokenizer.state_dict(),
+                        "config": self.config,
+                        "step": step,
+                    },
+                )
+                self.model.train()

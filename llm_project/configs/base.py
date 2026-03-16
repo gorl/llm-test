@@ -33,7 +33,7 @@ class ModelConfig:
     d_model: int = 128
     n_heads: int = 4
     hidden_dim: int = 512
-    dropout: float = 0.1
+    dropout: float = 0.05
     n_layers: int = 4
 
 # d_model = 384

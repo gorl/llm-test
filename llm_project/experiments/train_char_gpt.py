@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pickle
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from llm_project.batching.iter_sampler import PackedBatchSampler
@@ -18,15 +18,45 @@ from llm_project.training.trainer import Trainer
 from llm_project.utils.seed import set_seed
 
 
-def build_optimizer(model: torch.nn.Module, lr: float, weight_decay: float) -> torch.optim.Optimizer:
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    max_steps: int,
+    warmup_ratio: float = 0.02,
+    min_lr_ratio: float = 0.1,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    warmup_steps = int(max_steps * warmup_ratio)
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+
+        if step >= max_steps:
+            return min_lr_ratio
+
+        progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def build_optimizer(
+    model: torch.nn.Module,
+    lr: float,
+    weight_decay: float,
+) -> torch.optim.Optimizer:
     decay = set()
     no_decay = set()
 
     whitelist_weight_modules = (torch.nn.Linear,)
+
     blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
+    if hasattr(torch.nn, "RMSNorm"):
+        blacklist_weight_modules = blacklist_weight_modules + (torch.nn.RMSNorm,)
 
     for mn, m in model.named_modules():
-        for pn, _p in m.named_parameters(recurse=False):
+        for pn, _ in m.named_parameters(recurse=False):
             full_name = f"{mn}.{pn}" if mn else pn
 
             if pn.endswith("bias"):
@@ -38,12 +68,15 @@ def build_optimizer(model: torch.nn.Module, lr: float, weight_decay: float) -> t
             else:
                 no_decay.add(full_name)
 
-    param_dict = {pn: p for pn, p in model.named_parameters()}
+    param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
 
     inter_params = decay & no_decay
     union_params = decay | no_decay
+
     assert len(inter_params) == 0, f"Parameters in both decay/no_decay: {inter_params}"
-    assert len(param_dict.keys() - union_params) == 0, f"Parameters not separated: {param_dict.keys() - union_params}"
+    assert len(param_dict.keys() - union_params) == 0, (
+        f"Parameters not separated: {param_dict.keys() - union_params}"
+    )
 
     optim_groups = [
         {
@@ -166,12 +199,25 @@ def main() -> None:
     model = torch.compile(model)
 
     optimizer = build_optimizer(model, train_cfg.learning_rate, train_cfg.weight_decay)
+    scheduler = build_scheduler(
+        optimizer,
+        max_steps=train_cfg.max_steps,
+    )
+
+    # Чтобы warmup реально стартовал с нулевого lr.
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = 0.0
+
     start_step = 0
 
     if args.resume_from is not None:
         payload = load_checkpoint(args.resume_from, map_location=train_cfg.device)
         load_model_state(model, payload["model_state"])
         optimizer.load_state_dict(payload["optimizer_state"])
+
+        if "scheduler_state" in payload and payload["scheduler_state"] is not None:
+            scheduler.load_state_dict(payload["scheduler_state"])
+
         start_step = payload["step"] + 1
         print(f"Resumed training from step {start_step} using checkpoint {args.resume_from}")
 
@@ -191,6 +237,7 @@ def main() -> None:
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
+        scheduler=scheduler,
         train_sampler=train_sampler,
         val_sampler=val_sampler,
         batch_size=train_cfg.batch_size,
@@ -205,6 +252,7 @@ def main() -> None:
         amp_dtype=amp_dtype,
     )
     trainer.train()
+
     print(f"Checkpoint saved to {os.path.join(train_cfg.checkpoint_dir, 'last.pt')}")
 
 
