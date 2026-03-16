@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from llm_project.batching.random_sampler import RandomBatchSampler
+from llm_project.batching.iter_sampler import PackedBatchSampler
 from llm_project.configs.base import ModelConfig, TrainConfig
-from llm_project.data.lm_dataset import LanguageModelingDataset, LanguageModelingDatasetPlain
+from llm_project.data.lm_dataset import PackedTokenDataset, resolve_numpy_dtype
 from llm_project.experiments.active import build_model
 from llm_project.training.checkpoint import load_checkpoint, load_model_state
 from llm_project.training.trainer import Trainer
@@ -26,7 +26,7 @@ def build_optimizer(model: torch.nn.Module, lr: float, weight_decay: float) -> t
     blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
 
     for mn, m in model.named_modules():
-        for pn, p in m.named_parameters(recurse=False):
+        for pn, _p in m.named_parameters(recurse=False):
             full_name = f"{mn}.{pn}" if mn else pn
 
             if pn.endswith("bias"):
@@ -68,18 +68,24 @@ def load_prepared_data(data_dir: str):
     data_dir = Path(data_dir)
 
     with open(data_dir / "meta.json", "r", encoding="utf-8") as f:
-        meta = json.load(f)
+        root_meta = json.load(f)
+
+    with open(data_dir / "train" / "meta.json", "r", encoding="utf-8") as f:
+        train_meta = json.load(f)
+
+    with open(data_dir / "val" / "meta.json", "r", encoding="utf-8") as f:
+        val_meta = json.load(f)
 
     with open(data_dir / "tokenizer.pkl", "rb") as f:
         tokenizer = pickle.load(f)
 
-    dtype_name = meta.get("dtype", "uint16")
-    dtype = np.uint16 if dtype_name == "uint16" else np.int32
+    dtype_name = root_meta.get("dtype", "uint16")
+    dtype = resolve_numpy_dtype(dtype_name)
 
-    train_tokens = np.memmap(data_dir / "train.bin", dtype=dtype, mode="r")
-    val_tokens = np.memmap(data_dir / "val.bin", dtype=dtype, mode="r")
+    train_paths = [str(data_dir / "train" / name) for name in train_meta["files"]]
+    val_paths = [str(data_dir / "val" / name) for name in val_meta["files"]]
 
-    return train_tokens, val_tokens, tokenizer, meta
+    return train_paths, val_paths, tokenizer, root_meta, train_meta, val_meta, dtype
 
 
 def main() -> None:
@@ -99,6 +105,7 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
+
     if torch.cuda.is_available():
         device = "cuda"
     elif torch.backends.mps.is_available():
@@ -111,6 +118,7 @@ def main() -> None:
         amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
     else:
         amp_dtype = None
+
     train_cfg = TrainConfig(
         batch_size=args.batch_size,
         block_size=args.block_size,
@@ -121,17 +129,27 @@ def main() -> None:
     set_seed(train_cfg.seed)
 
     print("Loading prepared data...")
-    train_tokens, val_tokens, tokenizer, meta = load_prepared_data(args.prepared_data)
+    train_paths, val_paths, tokenizer, meta, train_meta, val_meta, dtype = load_prepared_data(args.prepared_data)
 
     print(f"Vocab size: {tokenizer.vocab_size}")
-    print(f"Train tokens: {len(train_tokens)}")
-    print(f"Val tokens: {len(val_tokens)}")
-    print(tokenizer.encode("Once upon a time"))
+    print(f"Train shards: {len(train_paths)}")
+    print(f"Val shards: {len(val_paths)}")
+    print(f"Train tokens: {train_meta['total_tokens']}")
+    print(f"Val tokens: {val_meta['total_tokens']}")
 
-    train_dataset = LanguageModelingDatasetPlain(train_tokens, train_cfg.block_size)
-    val_dataset = LanguageModelingDatasetPlain(val_tokens, train_cfg.block_size)
-    train_sampler = RandomBatchSampler(train_dataset, train_cfg.device)
-    val_sampler = RandomBatchSampler(val_dataset, train_cfg.device)
+    train_dataset = PackedTokenDataset(
+        paths=train_paths,
+        block_size=train_cfg.block_size,
+        dtype=dtype,
+    )
+    val_dataset = PackedTokenDataset(
+        paths=val_paths,
+        block_size=train_cfg.block_size,
+        dtype=dtype,
+    )
+
+    train_sampler = PackedBatchSampler(train_dataset, train_cfg.device)
+    val_sampler = PackedBatchSampler(val_dataset, train_cfg.device)
 
     print("Building model...")
     model_cfg = ModelConfig(
@@ -163,6 +181,11 @@ def main() -> None:
         "tokenizer_type": type(tokenizer).__name__,
         "prepared_data": args.prepared_data,
         "meta": meta,
+        "train_meta": train_meta,
+        "val_meta": val_meta,
+        "dtype": str(dtype),
+        "train_shards": train_paths,
+        "val_shards": val_paths,
     }
 
     trainer = Trainer(
