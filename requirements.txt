@@ -1,0 +1,4 @@
+torch>=2.2
+datasets
+torchinfo
+transformers

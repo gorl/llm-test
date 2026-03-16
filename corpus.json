@@ -1,0 +1,69 @@
+[
+  {
+    "id": "taiga_proza",
+    "path": "cointegrated/taiga_stripped_proza",
+    "split": "train",
+    "max_docs": 85
+  },
+  {
+    "id": "ru_wikipedia",
+    "path": "wikimedia/wikipedia",
+    "name": "20231101.ru",
+    "split": "train",
+    "max_docs": 195
+  },
+  {
+    "id": "taiga_stihi",
+    "path": "cointegrated/taiga_stripped_stihi",
+    "split": "train",
+    "max_docs": 200
+  },
+  {
+    "id": "taiga_arzamas",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "Arzamas",
+    "max_docs": 31
+  },
+  {
+    "id": "taiga_nplus1",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "NPlus1",
+    "max_docs": 70
+  },
+  {
+    "id": "taiga_interfax",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "Interfax",
+    "max_docs": 46
+  },
+  {
+    "id": "taiga_lenta",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "Lenta",
+    "max_docs": 36
+  },
+  {
+    "id": "taiga_magazines",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "Magazines",
+    "max_docs": 39
+  },
+  {
+    "id": "taiga_kp",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "KP",
+    "max_docs": 10
+  },
+  {
+    "id": "taiga_fontanka",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "Fontanka",
+    "max_docs": 30
+  },
+  {
+    "id": "taiga_subtitles",
+    "path": "cointegrated/taiga_stripped_rest",
+    "split": "Subtitles",
+    "max_docs": 30
+  }
+]
